@@ -1,8 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Camera, ArrowLeft, AlertTriangle } from "lucide-react";
-import { Html5QrcodeScanner } from 'html5-qrcode';
+import { BrowserQRCodeReader, IScannerControls } from '@zxing/browser';
 import { QRCombatData } from '@/types/game';
 
 interface QRScannerProps {
@@ -13,8 +13,10 @@ interface QRScannerProps {
 const QRScanner = ({ onScanSuccess, onBack }: QRScannerProps) => {
   const [isScanning, setIsScanning] = useState(false);
   const [error, setError] = useState<string>('');
-  const [scanner, setScanner] = useState<Html5QrcodeScanner | null>(null);
   const [permissionGranted, setPermissionGranted] = useState<boolean | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const controlsRef = useRef<IScannerControls | null>(null);
+  const readerRef = useRef<BrowserQRCodeReader | null>(null);
 
   const checkCameraPermission = async () => {
     try {
@@ -29,7 +31,7 @@ const QRScanner = ({ onScanSuccess, onBack }: QRScannerProps) => {
 
       const stream = await navigator.mediaDevices.getUserMedia({ 
         video: { 
-          facingMode: 'environment' // Preferir cámara trasera en móviles
+          facingMode: { ideal: 'environment' }
         } 
       });
       stream.getTracks().forEach(track => track.stop());
@@ -52,45 +54,48 @@ const QRScanner = ({ onScanSuccess, onBack }: QRScannerProps) => {
     setIsScanning(true);
 
     try {
-      const html5QrcodeScanner = new Html5QrcodeScanner(
-        "qr-reader-player",
-        { 
-          fps: 10, 
-          qrbox: { width: 250, height: 250 },
-          aspectRatio: 1.0,
-          showTorchButtonIfSupported: true,
-          videoConstraints: {
-            facingMode: { ideal: "environment" }
-          }
-        },
-        false
-      );
+      if (!readerRef.current) {
+        readerRef.current = new BrowserQRCodeReader();
+      }
 
-      html5QrcodeScanner.render(
-        (decodedText) => {
-          try {
-            const data = JSON.parse(decodedText);
-            if (data.type === 'combat' && data.encounter) {
-              onScanSuccess(data);
-              html5QrcodeScanner.clear();
-              setIsScanning(false);
-            } else {
-              setError('QR no válido para combate. Asegúrate de escanear un código QR generado por el narrador.');
+      const videoInputDevices = await BrowserQRCodeReader.listVideoInputDevices();
+      let selectedDeviceId = videoInputDevices[0].deviceId;
+
+      // Intentar usar la cámara trasera en dispositivos móviles
+      const backCamera = videoInputDevices.find(device => 
+        device.label.toLowerCase().includes('back') || 
+        device.label.toLowerCase().includes('trasera')
+      );
+      if (backCamera) {
+        selectedDeviceId = backCamera.deviceId;
+      }
+
+      if (videoRef.current) {
+        controlsRef.current = await readerRef.current.decodeFromVideoDevice(
+          selectedDeviceId,
+          videoRef.current,
+          (result, error, controls) => {
+            if (result) {
+              try {
+                const data = JSON.parse(result.getText());
+                if (data.type === 'combat' && data.encounter) {
+                  onScanSuccess(data);
+                  controls.stop();
+                  setIsScanning(false);
+                } else {
+                  setError('QR no válido para combate. Asegúrate de escanear un código QR generado por el narrador.');
+                }
+              } catch (err) {
+                console.error('Error parsing QR data:', err);
+                setError('Error al leer el código QR. El formato no es válido.');
+              }
             }
-          } catch (err) {
-            console.error('Error parsing QR data:', err);
-            setError('Error al leer el código QR. El formato no es válido.');
+            if (error && error.message !== 'NotFound') {
+              console.error('Error scanning:', error);
+            }
           }
-        },
-        (error) => {
-          // Solo mostrar errores importantes
-          if (error?.includes('NotFoundError')) {
-            setError('No se pudo acceder a la cámara. Verifica los permisos.');
-          }
-        }
-      );
-
-      setScanner(html5QrcodeScanner);
+        );
+      }
     } catch (err) {
       console.error('Error starting scanner:', err);
       setError('Error al iniciar el escáner. Verifica que tu dispositivo tenga cámara disponible.');
@@ -99,9 +104,9 @@ const QRScanner = ({ onScanSuccess, onBack }: QRScannerProps) => {
   };
 
   const stopScanning = () => {
-    if (scanner) {
-      scanner.clear().catch(console.error);
-      setScanner(null);
+    if (controlsRef.current) {
+      controlsRef.current.stop();
+      controlsRef.current = null;
     }
     setIsScanning(false);
     setError('');
@@ -115,8 +120,8 @@ const QRScanner = ({ onScanSuccess, onBack }: QRScannerProps) => {
   useEffect(() => {
     checkCameraPermission();
     return () => {
-      if (scanner) {
-        scanner.clear().catch(console.error);
+      if (controlsRef.current) {
+        controlsRef.current.stop();
       }
     };
   }, []);
@@ -184,7 +189,12 @@ const QRScanner = ({ onScanSuccess, onBack }: QRScannerProps) => {
                   Apunta la cámara hacia el código QR del narrador
                 </p>
               </div>
-              <div id="qr-reader-player" className="mx-auto"></div>
+              <div className="relative aspect-video max-w-lg mx-auto">
+                <video 
+                  ref={videoRef}
+                  className="w-full h-full object-cover rounded-lg"
+                />
+              </div>
               <div className="text-center">
                 <Button 
                   onClick={stopScanning}
